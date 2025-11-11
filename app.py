@@ -1,9 +1,13 @@
+import os
 import streamlit as st
 import google.generativeai as genai
 from sqlalchemy import create_engine, text
 from utilities import text2sql, get_db_schema
 from constants import DB_PATH
-import os
+from dotenv import load_dotenv
+load_dotenv()
+
+api_key = os.getenv("GENAI_API_KEY1")
 
 # ---------------------- PAGE CONFIG ----------------------
 st.set_page_config(page_title="ChatDB - Chat with SQL", page_icon="🤖", layout="wide")
@@ -22,36 +26,41 @@ st.markdown(
             color: gray;
             margin-bottom: 2rem;
         }
+        .banner {
+            background-color: #f0f2f6;
+            border-radius: 8px;
+            padding: 0.6rem 1rem;
+            margin-bottom: 1.2rem;
+            font-weight: 500;
+        }
     </style>
     """,
     unsafe_allow_html=True,
 )
+
 st.markdown("<div class='main-header'>🦜 ChatDB</div>", unsafe_allow_html=True)
 st.markdown("<div class='sub-header'>Chat naturally with your SQL database and get instant insights</div>", unsafe_allow_html=True)
 
 # ---------------------- SESSION INITIALIZATION ----------------------
-if "engine" not in st.session_state:
-    st.session_state.engine = None
-if "connected_db" not in st.session_state:
-    st.session_state.connected_db = "Default SQLite"
-if "question_history" not in st.session_state:
-    st.session_state.question_history = []
-if "show_schema" not in st.session_state:
-    st.session_state.show_schema = False
-if "show_history" not in st.session_state:
-    st.session_state.show_history = False
-if "last_sql_query" not in st.session_state:
-    st.session_state.last_sql_query = None
-if "last_result" not in st.session_state:
-    st.session_state.last_result = None
+defaults = {
+    "engine": None,
+    "connected_db": "Default SQLite",
+    "question_history": [],
+    "show_schema": False,
+    "show_history": False,
+    "last_sql_query": None,
+    "last_result": None,
+}
+for k, v in defaults.items():
+    st.session_state.setdefault(k, v)
 
-# ---------------------- DB HELPER ----------------------
+# ---------------------- DATABASE CONNECTION HELPER ----------------------
 def get_database(db_type, db_path=None, mysql_host=None, mysql_user=None, mysql_password=None, mysql_db=None, mysql_port=3306):
     """Return SQLAlchemy engine for SQLite or MySQL."""
     try:
         if db_type == "sqlite":
             if not db_path:
-                raise ValueError("SQLite path missing.")
+                raise ValueError("SQLite DB path missing.")
             return create_engine(f"sqlite:///{db_path}")
 
         elif db_type == "mysql":
@@ -59,13 +68,13 @@ def get_database(db_type, db_path=None, mysql_host=None, mysql_user=None, mysql_
                 raise ValueError("Missing MySQL details.")
             url = f"mysql+mysqlconnector://{mysql_user}:{mysql_password}@{mysql_host}:{mysql_port}/{mysql_db}"
             return create_engine(url)
+
     except Exception as e:
         st.error(f"❌ Database connection failed: {e}")
         return None
 
-# ---------------------- CONNECT DATABASE ----------------------
-st.sidebar.subheader("🗄️ Database Connection")
-
+# ---------------------- SIDEBAR CONFIG ----------------------
+st.sidebar.header("⚙️ Configuration")
 mode = st.sidebar.radio(
     "Select Connection Type:",
     ["Use Default Demo Database (SQLite)", "Connect MySQL Database"],
@@ -73,6 +82,7 @@ mode = st.sidebar.radio(
 
 fallback_used = False
 
+# ---- MySQL Connection ----
 if mode == "Connect MySQL Database":
     mysql_host = st.sidebar.text_input("MySQL Host", value="localhost")
     mysql_port = st.sidebar.text_input("Port", value="3306")
@@ -90,21 +100,34 @@ if mode == "Connect MySQL Database":
                 mysql_db=mysql_db,
                 mysql_port=int(mysql_port),
             )
-            # ✅ FIX: wrap SQL in text()
+
+            if engine is None:
+                raise Exception("Engine creation failed (check credentials or driver).")
+
             with engine.connect() as conn:
                 conn.execute(text("SELECT 1"))
+
             st.session_state.engine = engine
             st.session_state.connected_db = f"MySQL ({mysql_db})"
             st.sidebar.success(f"✅ Connected to MySQL Database: {mysql_db}")
+
+        except ModuleNotFoundError:
+            st.sidebar.error("❌ MySQL driver missing. Please install `mysql-connector-python`.")
+            st.sidebar.info("🔄 Falling back to demo SQLite database...")
+            engine = get_database("sqlite", db_path=DB_PATH)
+            st.session_state.engine = engine
+            st.session_state.connected_db = "Default SQLite (Fallback)"
+            fallback_used = True
+
         except Exception as e:
             st.sidebar.error(f"❌ MySQL connection failed: {e}")
             st.sidebar.info("🔄 Falling back to demo SQLite database...")
             engine = get_database("sqlite", db_path=DB_PATH)
-            if engine:
-                st.session_state.engine = engine
-                st.session_state.connected_db = "Default SQLite (Fallback)"
-                fallback_used = True
+            st.session_state.engine = engine
+            st.session_state.connected_db = "Default SQLite (Fallback)"
+            fallback_used = True
 
+# ---- SQLite Default ----
 else:
     if st.session_state.engine is None or st.session_state.connected_db != "Default SQLite":
         engine = get_database("sqlite", db_path=DB_PATH)
@@ -118,11 +141,11 @@ if not st.session_state.engine:
     st.error("⚠️ No database connection found. Please connect to continue.")
     st.stop()
 
-# ---------------------- GEMINI API SETUP ----------------------
-api_key = st.sidebar.text_input("Enter your Google Gemini API Key:", type="password")
-if not api_key:
-    st.warning("🔑 Please provide your Google API key to continue.")
-    st.stop()
+# ---------------------- GEMINI API ----------------------
+# api_key = st.sidebar.text_input("Enter your Google Gemini API Key:", type="password")
+# if not api_key:
+#     st.warning("🔑 Please provide your Google API key to continue.")
+#     st.stop()
 
 try:
     genai.configure(api_key=api_key)
@@ -131,10 +154,12 @@ except Exception as e:
     st.error(f"❌ API configuration failed: {e}")
     st.stop()
 
-# ---------------------- MAIN CHAT ----------------------
-st.write(f"### 📊 Connected Database: `{st.session_state.connected_db}`")
+# ---------------------- MAIN CHAT AREA ----------------------
+db_label = st.session_state.connected_db
+banner_color = "#aa52b3" if "MySQL" in db_label else "#96df8769"
+st.markdown(f"<div class='banner' style='background-color:{banner_color};'>📊 Connected Database: <b>{db_label}</b></div>", unsafe_allow_html=True)
 if fallback_used:
-    st.info("⚙️ You’re now using the demo database because your MySQL connection failed.")
+    st.info("⚙️ You’re using the demo SQLite database because the MySQL connection failed.")
 
 query = st.text_input("💬 Ask your question about the database:")
 
@@ -186,7 +211,7 @@ def toggle_history():
     st.session_state.show_history = not st.session_state.show_history
 
 def reset_conversation():
-    st.session_state.question_history = []
+    st.session_state.question_history.clear()
     st.session_state.last_sql_query = None
     st.session_state.last_result = None
     st.sidebar.success("✅ Cleared history and last output!")
