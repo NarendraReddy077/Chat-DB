@@ -29,4 +29,4 @@ Schema:
 {schemas}
 """
 
-DB_PATH = "data\ecommerce_with_employees.db"
+DB_PATH = "data/ecommerce_with_employees.db"
